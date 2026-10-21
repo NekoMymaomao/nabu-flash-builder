@@ -1,0 +1,24 @@
+{
+  "recovery": "OrangeFox R12.0 Unofficial nabu",
+  "boot_sha256": "334f1be9eadc7794e0da2a3f82f4a3920eb8983752dd3e41996679fb993e234c",
+  "recovery_format_fix": "format-fix/boot.json: idle userdata mapping removed before physical make_f2fs",
+  "ramdisk_sha256": "a84632f90090b29bfc21c305b3088ecc361b03c49daca352b474548b32ad7ba1",
+  "recovery_source_sha256": "73cd1683d3262e2a7dcbbe7ee0454d042dac711410913b683bd8ef98035df41e",
+  "android_base_sha256": "1b6e26291f74738bfbed5b210e7a8634e4883ec6af75d5b5c7663503cb539bbe",
+  "kernel_sha256": "a75935823ff94354765ee38eb3977b902618d669b9b2bee0ee0576c29dc42245",
+  "kernel_root": "BakaSU 35229, d7260ca1e5c128061122924d0d48754e361e135c",
+  "cmdline": "",
+  "image_size": 134217728,
+  "android_first_stage_files": [
+    "first_stage_ramdisk",
+    "first_stage_ramdisk/avb",
+    "first_stage_ramdisk/avb/q-gsi.avbpubkey",
+    "first_stage_ramdisk/avb/r-gsi.avbpubkey",
+    "first_stage_ramdisk/avb/s-gsi.avbpubkey",
+    "first_stage_ramdisk/system",
+    "first_stage_ramdisk/system/bin",
+    "first_stage_ramdisk/system/bin/e2fsck"
+  ],
+  "normal_boot": "androidboot.force_normal_boot=1 from bootloader",
+  "recovery_boot": "normal recovery bootloader mode, no twrpfastboot override"
+}
