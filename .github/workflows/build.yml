@@ -8,8 +8,8 @@ on:
   workflow_dispatch:
     inputs:
       line_zip_url:
-        description: "Line flash package URL (.zip)"
-        required: true
+        description: "Line flash package URL (.zip), leave empty to use local file"
+        required: false
         default: ""
       card_zip_url:
         description: "Card flash template URL (.zip, optional - uses repo template if empty)"
