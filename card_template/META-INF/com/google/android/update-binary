@@ -1,0 +1,169 @@
+#!/sbin/sh
+export LC_ALL=C
+set -f
+# Recovery launchers may export a non-default field separator.
+IFS=' 	
+'
+OUTFD="/proc/self/fd/$2"
+ZIP="$3"
+TMP="/tmp/zxcwsurx_installer_$$"
+ZSTD="$TMP/zstd"
+IO="$TMP/recovery-io"
+SLOTTED="vbmeta vbmeta_system dtbo vendor_boot boot keymaster"
+PARTS="vbmeta vbmeta_system dtbo vendor_boot boot keymaster super"
+LAYOUT="vbmeta 10723433 1729 2227596346 131072
+vbmeta_system 10725240 1450 753681534 131072
+dtbo 10726759 38483 842328167 309437
+vendor_boot 10765318 88538 3273810006 100663296
+boot 10853925 40096988 3884996112 134217728
+keymaster 50950987 109351 244110628 282624
+super 51060408 4940294508 737853691 9126805504
+zstd 1328 1390080 2458966401 0
+io 1391458 668928 1356358286 0
+bootctl 2060432 154248 1807406388 0"
+BLOCKS=/dev/block/bootdevice/by-name
+decoder=
+started=$(date +%s)
+
+ui_print() { printf 'ui_print %s\nui_print\n' "$1" >> "$OUTFD"; }
+cleanup() {
+    [ -z "$decoder" ] || { kill "$decoder" 2>/dev/null; wait "$decoder" 2>/dev/null; }
+    rm -r "$TMP" 2>/dev/null
+}
+abort() {
+    ui_print "Error: $1"
+    ui_print "Installation stopped. Do not boot if a write was interrupted."
+    exit 1
+}
+trap cleanup EXIT
+trap 'abort "Installation interrupted"' HUP INT TERM
+
+load_entry() {
+    entry_name="$1"
+    entry=$(printf '%s\n' "$LAYOUT" | grep "^$1 ") || abort "Missing entry: $1"
+    [ "$(printf '%s\n' "$entry" | wc -l)" = 1 ] || abort "Duplicate entry: $1"
+    # TWRP's mksh tries to back here-documents with a temporary file in a
+    # nonexistent directory while /data is locked. Parse without a here-doc,
+    # read redirection, or any dependency on that shell's temporary directory.
+    entry=$(printf '%s' "$entry" | tr -d '\r')
+    saved_ifs="$IFS"
+    IFS=' 	'
+    set -- $entry
+    IFS="$saved_ifs"
+    [ "$#" = 5 ] || abort "Invalid entry: $entry_name ($# fields)"
+    name="$1" offset="$2" size="$3" crc="$4" raw_size="$5"
+    for value in "$offset" "$size" "$crc" "$raw_size"; do
+        case "$value" in ''|*[!0-9]*)
+            abort "Invalid entry numbers: $entry_name (offset=$offset size=$size crc=$crc raw=$raw_size)" ;;
+        esac
+    done
+    [ "$size" != 0 ] || abort "Empty entry: $entry_name"
+}
+targets() {
+    case " $SLOTTED " in
+        *" $1 "*) set -- "$BLOCKS/${1}_a" ;;
+        *) set -- "$BLOCKS/$1" ;;
+    esac
+    for target in "$@"; do
+        [ -b "$target" ] || abort "Partition not found: $target"
+        printf '%s\n' "$target"
+    done
+}
+bootstrap() {
+    load_entry "$1"
+    if dd if=/dev/null of=/dev/null count=0 iflag=skip_bytes,count_bytes status=none 2>/dev/null; then
+        dd if="$ZIP" bs=1M skip="$offset" count="$size" \
+            iflag=skip_bytes,count_bytes status=none > "$2" || abort "Extracting $1 failed"
+    else
+        one_based=$(awk -v n="$offset" 'BEGIN {printf "%.0f", n+1}')
+        tail -c "+$one_based" "$ZIP" | head -c "$size" > "$2" || abort "Extracting $1 failed"
+    fi
+    [ "$(wc -c < "$2")" = "$size" ] || abort "Truncated tool: $1"
+    chmod 0755 "$2" || abort "Cannot prepare $1"
+}
+write_img() {
+    load_entry "$1"
+    part="$1"
+    destinations=$(targets "$part") || abort "Missing targets for $part"
+    ui_print "Flashing $part..."
+    before=$(date +%s)
+    rm -f "$TMP/extract-ok"
+    mkfifo "$TMP/image-stream" || abort "Cannot create stream"
+    (
+        "$IO" extract "$ZIP" "$offset" "$size" && : > "$TMP/extract-ok"
+    ) | "$ZSTD" -q --long=27 -d -c > "$TMP/image-stream" &
+    decoder=$!
+    # Generated target paths contain no whitespace. Slot B is never written.
+    "$IO" write "$raw_size" $destinations < "$TMP/image-stream"
+    write_status=$?
+    [ "$write_status" = 0 ] || kill "$decoder" 2>/dev/null
+    wait "$decoder"
+    decode_status=$?
+    decoder=
+    rm "$TMP/image-stream"
+    [ "$write_status" = 0 ] && [ "$decode_status" = 0 ] && [ -f "$TMP/extract-ok" ] || \
+        abort "Writing $part failed (writer=$write_status zstd=$decode_status)"
+    ui_print "  $part: $(( $(date +%s) - before ))s"
+}
+
+ui_print "================================================"
+ui_print "ColorOS 17 | Xiaomi Pad 5 (nabu)"
+ui_print "1789753030042 | Android 17"
+ui_print "Patch level: 2026-09-01"
+ui_print "Build date: 19 Oct 2026"
+ui_print "Installer by zxcwsurx"
+ui_print "================================================"
+
+ok=0
+for p in ro.product.device ro.build.product ro.product.vendor.device ro.product.system.device ro.boot.hwname; do
+    case "$(getprop "$p")" in nabu|nabu_global|nabu_in|nabu_cn) ok=1 ;; esac
+done
+[ "$ok" = 1 ] || abort "This package is only for Xiaomi Pad 5 (nabu)"
+[ -f "$ZIP" ] || abort "ZIP is not a local regular file"
+case "$(readlink -f "$ZIP")" in
+    /system/*|/system_root/*|/system_ext/*|/product/*|/vendor/*|/odm/*)
+        abort "Move the ZIP to internal storage or USB storage first" ;;
+esac
+mkdir "$TMP" || abort "Cannot create temporary directory"
+export TMPDIR="$TMP"
+bootstrap io "$IO"
+bootstrap zstd "$ZSTD"
+bootstrap bootctl "$TMP/bootctl"
+"$IO" version || abort "recovery-io cannot run"
+"$ZSTD" -V >/dev/null 2>&1 || abort "zstd cannot run"
+
+before=$(date +%s)
+case " $PARTS " in *" super "*) ;; *) abort "Missing super partition" ;; esac
+for part in $PARTS; do
+    case "$part" in vbmeta|vbmeta_system|dtbo|vendor_boot|boot|keymaster|super) ;;
+        *) abort "Unsupported partition: $part" ;;
+    esac
+done
+for part in io zstd bootctl $PARTS; do
+    load_entry "$part"
+    ui_print "Checking $part..."
+    "$IO" check "$ZIP" "$offset" "$size" "$crc" || abort "$part is corrupt"
+    case "$part" in io|zstd|bootctl) continue ;; esac
+    [ "$raw_size" != 0 ] || abort "Missing raw size: $part"
+    destinations=$(targets "$part") || abort "Missing targets for $part"
+    "$IO" target "$raw_size" $destinations || abort "Invalid target size: $part"
+done
+ui_print "Package checked: $(( $(date +%s) - before ))s"
+
+for m in /system_root/system /system /system_ext /product /vendor /odm /system_dlkm /vendor_dlkm /odm_dlkm /mi_ext /my_product /my_manifest /system_root; do
+    if awk -v m="$m" '$2 == m {found=1} END {exit !found}' /proc/mounts; then
+        umount "$m" || abort "Cannot unmount $m"
+    fi
+done
+for part in $PARTS; do write_img "$part"; done
+
+slot_ok=0
+for b in /system/bin/bootctl /sbin/bootctl "$TMP/bootctl" bootctl; do
+    if "$b" set-active-boot-slot 0 >/dev/null 2>&1; then slot_ok=1; break; fi
+done
+[ "$slot_ok" = 1 ] || abort "Cannot activate slot A. Run: fastboot set_active a"
+ui_print "================================================"
+ui_print "Done. Active slot: A. Total: $(( $(date +%s) - started ))s"
+ui_print "Coming from another ROM? Format data before booting."
+ui_print "================================================"
+exit 0
