@@ -1,0 +1,180 @@
+name: Build Flash Package
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+  workflow_dispatch:
+    inputs:
+      line_zip_url:
+        description: "Line flash package URL (.zip)"
+        required: true
+        default: ""
+      card_zip_url:
+        description: "Card flash template URL (.zip)"
+        required: false
+        default: ""
+      package_name:
+        description: "Package name (e.g. LineageOS 23.2)"
+        required: true
+        default: "LineageOS 23.2"
+      device_name:
+        description: "Device name (e.g. Xiaomi Pad 5 (nabu))"
+        required: true
+        default: "Xiaomi Pad 5 (nabu)"
+      android_ver:
+        description: "Android version"
+        required: true
+        default: "Android 13"
+      bundle_number:
+        description: "Build/bundle number (optional)"
+        required: false
+        default: ""
+      patch_level:
+        description: "Security patch level (e.g. 2026-09-01, optional)"
+        required: false
+        default: ""
+      build_date:
+        description: "Build date (e.g. 21 Oct 2026, optional)"
+        required: false
+        default: ""
+      author:
+        description: "Installer author"
+        required: false
+        default: ""
+      compression_ratio:
+        description: "Compression ratio estimate (default 0.60)"
+        required: false
+        default: "0.60"
+      release_tag:
+        description: "GitHub Release tag (e.g. v1.0, optional)"
+        required: false
+        default: ""
+      release_name:
+        description: "GitHub Release name (optional, defaults to package_name)"
+        required: false
+        default: ""
+      release_body:
+        description: "GitHub Release body / notes (optional)"
+        required: false
+        default: ""
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    outputs:
+      artifact_path: ${{ steps.build.outputs.artifact_path }}
+      release_tag: ${{ steps.build.outputs.release_tag }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install zstd
+        run: sudo apt-get update && sudo apt-get install -y zstd
+
+      - name: Download line flash package
+        run: |
+          URL="${{ inputs.line_zip_url }}"
+          if [ -z "$URL" ]; then
+            echo "No line flash URL provided, skipping download"
+            exit 0
+          fi
+          mkdir -p inputs
+          curl -L -o inputs/lineflash.zip "$URL"
+          echo "Downloaded line flash: $(ls -lh inputs/lineflash.zip | awk '{print $5}')"
+
+      - name: Download card flash template
+        run: |
+          URL="${{ inputs.card_zip_url }}"
+          if [ -z "$URL" ]; then
+            echo "No template URL provided, using repo templates"
+            exit 0
+          fi
+          mkdir -p inputs
+          curl -L -o inputs/card_template.zip "$URL"
+          TEMP_CARD=$(mktemp -d)
+          unzip -q inputs/card_template.zip -d "$TEMP_CARD"
+          echo "CARD_DIR=$TEMP_CARD" >> $GITHUB_ENV
+          echo "Downloaded template: $(ls -lh inputs/card_template.zip | awk '{print $5}')"
+
+      - name: Build flash package
+        id: build
+        env:
+          PACKAGE_NAME: ${{ inputs.package_name }}
+          DEVICE_NAME: ${{ inputs.device_name }}
+          ANDROID_VER: ${{ inputs.android_ver }}
+          BUNDLE_NUMBER: ${{ inputs.bundle_number }}
+          PATCH_LEVEL: ${{ inputs.patch_level }}
+          BUILD_DATE: ${{ inputs.build_date }}
+          AUTHOR: ${{ inputs.author }}
+          COMPRESSION_RATIO: ${{ inputs.compression_ratio }}
+        run: |
+          echo "=== Build Configuration ==="
+          echo "Package: $PACKAGE_NAME"
+          echo "Device:  $DEVICE_NAME"
+          echo "Android: $ANDROID_VER"
+          [ -n "$BUNDLE_NUMBER" ]    && echo "Bundle:  $BUNDLE_NUMBER"
+          [ -n "$PATCH_LEVEL" ]      && echo "Patch:   $PATCH_LEVEL"
+          [ -n "$BUILD_DATE" ]       && echo "Date:    $BUILD_DATE"
+          [ -n "$AUTHOR" ]           && echo "Author:  $AUTHOR"
+          echo "Ratio:   $COMPRESSION_RATIO"
+          echo "=========================="
+
+          LINE_ZIP=""
+          [ -f "inputs/lineflash.zip" ] && LINE_ZIP="inputs/lineflash.zip"
+          [ -d "lineflash" ]             && LINE_ZIP="lineflash"
+
+          CARD_DIR="${{ env.CARD_DIR }}"
+          [ -z "$CARD_DIR" ] && [ -d "card_template" ] && CARD_DIR="card_template"
+
+          mkdir -p build_output
+          python3 build.py \
+            --line-zip "$LINE_ZIP" \
+            --card-dir "$CARD_DIR" \
+            --output build_output \
+            --ratio "$COMPRESSION_RATIO" \
+            --package-name "$PACKAGE_NAME" \
+            --device-name  "$DEVICE_NAME" \
+            --android-ver  "$ANDROID_VER" \
+            --bundle-number "$BUNDLE_NUMBER" \
+            --patch-level  "$PATCH_LEVEL" \
+            --build-date   "$BUILD_DATE" \
+            --author       "$AUTHOR"
+
+          ZIP_FILE=$(ls build_output/*.zip | head -1)
+          echo "artifact_path=$ZIP_FILE" >> $GITHUB_OUTPUT
+          echo "Built: $(ls -lh "$ZIP_FILE" | awk '{print $5}')"
+
+      - name: Upload to Release
+        id: release
+        uses: softprops/action-gh-release@v2
+        if: github.event_name == 'workflow_dispatch' && startsWith(inputs.release_tag, 'v')
+        with:
+          tag_name: ${{ inputs.release_tag }}
+          name: ${{ inputs.release_name || inputs.package_name }}
+          body: ${{ inputs.release_body }}
+          files: ${{ steps.build.outputs.artifact_path }}
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Upload artifact (fallback)
+        if: github.event_name == 'workflow_dispatch' && !startsWith(inputs.release_tag, 'v')
+        uses: actions/upload-artifact@v4
+        with:
+          name: flash-package
+          path: ${{ steps.build.outputs.artifact_path }}
+          retention-days: 30
+
+      - name: Show result
+        run: |
+          echo "=== Build Result ==="
+          ls -lh build_output/
+          echo "===================="
