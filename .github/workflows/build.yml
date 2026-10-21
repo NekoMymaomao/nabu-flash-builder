@@ -12,7 +12,7 @@ on:
         required: true
         default: ""
       card_zip_url:
-        description: "Card flash template URL (.zip)"
+        description: "Card flash template URL (.zip, optional - uses repo template if empty)"
         required: false
         default: ""
       package_name:
@@ -48,7 +48,7 @@ on:
         required: false
         default: "0.60"
       release_tag:
-        description: "GitHub Release tag (e.g. v1.0, optional)"
+        description: "GitHub Release tag (e.g. v1.0, leave empty to skip release)"
         required: false
         default: ""
       release_name:
@@ -65,7 +65,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       artifact_path: ${{ steps.build.outputs.artifact_path }}
-      release_tag: ${{ steps.build.outputs.release_tag }}
+      zip_name: ${{ steps.build.outputs.zip_name }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -82,26 +82,29 @@ jobs:
         run: |
           URL="${{ inputs.line_zip_url }}"
           if [ -z "$URL" ]; then
-            echo "No line flash URL provided, skipping download"
-            exit 0
+            echo "No line flash URL provided, will use local directory if exists"
+          else
+            mkdir -p inputs
+            curl -L -o inputs/lineflash.zip "$URL"
+            echo "Downloaded line flash: $(ls -lh inputs/lineflash.zip | awk '{print $5}')"
           fi
-          mkdir -p inputs
-          curl -L -o inputs/lineflash.zip "$URL"
-          echo "Downloaded line flash: $(ls -lh inputs/lineflash.zip | awk '{print $5}')"
 
-      - name: Download card flash template
+      - name: Download card flash template (optional)
+        id: template
         run: |
           URL="${{ inputs.card_zip_url }}"
           if [ -z "$URL" ]; then
-            echo "No template URL provided, using repo templates"
-            exit 0
+            echo "No template URL provided, using repo card_template/"
+            echo "use_repo_template=true" >> $GITHUB_OUTPUT
+          else
+            mkdir -p inputs
+            curl -L -o inputs/card_template.zip "$URL"
+            TEMP_CARD=$(mktemp -d)
+            unzip -q inputs/card_template.zip -d "$TEMP_CARD"
+            echo "CARD_DIR=$TEMP_CARD" >> $GITHUB_ENV
+            echo "use_repo_template=false" >> $GITHUB_OUTPUT
+            echo "Downloaded template: $(ls -lh inputs/card_template.zip | awk '{print $5}')"
           fi
-          mkdir -p inputs
-          curl -L -o inputs/card_template.zip "$URL"
-          TEMP_CARD=$(mktemp -d)
-          unzip -q inputs/card_template.zip -d "$TEMP_CARD"
-          echo "CARD_DIR=$TEMP_CARD" >> $GITHUB_ENV
-          echo "Downloaded template: $(ls -lh inputs/card_template.zip | awk '{print $5}')"
 
       - name: Build flash package
         id: build
@@ -126,12 +129,23 @@ jobs:
           echo "Ratio:   $COMPRESSION_RATIO"
           echo "=========================="
 
+          # Determine sources
           LINE_ZIP=""
           [ -f "inputs/lineflash.zip" ] && LINE_ZIP="inputs/lineflash.zip"
           [ -d "lineflash" ]             && LINE_ZIP="lineflash"
 
-          CARD_DIR="${{ env.CARD_DIR }}"
+          CARD_DIR=""
+          [ -n "${{ env.CARD_DIR }}" ]  && CARD_DIR="${{ env.CARD_DIR }}"
           [ -z "$CARD_DIR" ] && [ -d "card_template" ] && CARD_DIR="card_template"
+
+          if [ -z "$LINE_ZIP" ]; then
+            echo "ERROR: No line flash package provided"
+            exit 1
+          fi
+          if [ -z "$CARD_DIR" ]; then
+            echo "ERROR: No card template found"
+            exit 1
+          fi
 
           mkdir -p build_output
           python3 build.py \
@@ -148,13 +162,15 @@ jobs:
             --author       "$AUTHOR"
 
           ZIP_FILE=$(ls build_output/*.zip | head -1)
+          ZIP_NAME=$(basename "$ZIP_FILE")
           echo "artifact_path=$ZIP_FILE" >> $GITHUB_OUTPUT
+          echo "zip_name=$ZIP_NAME" >> $GITHUB_OUTPUT
           echo "Built: $(ls -lh "$ZIP_FILE" | awk '{print $5}')"
 
-      - name: Upload to Release
+      - name: Create GitHub Release
+        if: github.event_name == 'workflow_dispatch' && inputs.release_tag != ''
         id: release
         uses: softprops/action-gh-release@v2
-        if: github.event_name == 'workflow_dispatch' && startsWith(inputs.release_tag, 'v')
         with:
           tag_name: ${{ inputs.release_tag }}
           name: ${{ inputs.release_name || inputs.package_name }}
@@ -165,13 +181,13 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Upload artifact (fallback)
-        if: github.event_name == 'workflow_dispatch' && !startsWith(inputs.release_tag, 'v')
+      - name: Upload artifact (no release)
+        if: github.event_name == 'workflow_dispatch' && inputs.release_tag == ''
         uses: actions/upload-artifact@v4
         with:
           name: flash-package
           path: ${{ steps.build.outputs.artifact_path }}
-          retention-days: 30
+          retention-days: 7
 
       - name: Show result
         run: |
