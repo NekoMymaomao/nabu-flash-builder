@@ -63,6 +63,7 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     outputs:
       artifact_path: ${{ steps.build.outputs.artifact_path }}
       zip_name: ${{ steps.build.outputs.zip_name }}
@@ -78,6 +79,22 @@ jobs:
       - name: Install zstd
         run: sudo apt-get update && sudo apt-get install -y zstd
 
+      - name: Check disk space
+        run: |
+          echo "=== Disk Space Before ==="
+          df -h /
+          du -sh inputs/ 2>/dev/null || echo "inputs/ not found"
+          echo "=========================="
+
+      - name: Clean workspace
+        run: |
+          echo "Cleaning workspace..."
+          # Remove unnecessary files to free space
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android || true
+          sudo rm -rf /tmp/* || true
+          echo "=== Disk Space After Cleanup ==="
+          df -h /
+
       - name: Download line flash package
         run: |
           URL="${{ inputs.line_zip_url }}"
@@ -85,8 +102,9 @@ jobs:
             echo "No line flash URL provided, will use local directory if exists"
           else
             mkdir -p inputs
-            curl -L -o inputs/lineflash.zip "$URL"
-            echo "Downloaded line flash: $(ls -lh inputs/lineflash.zip | awk '{print $5}')"
+            echo "Downloading line flash package..."
+            curl -L --progress-bar -o inputs/lineflash.zip "$URL"
+            echo "Downloaded: $(ls -lh inputs/lineflash.zip | awk '{print $5}')"
           fi
 
       - name: Download card flash template (optional)
@@ -98,7 +116,7 @@ jobs:
             echo "use_repo_template=true" >> $GITHUB_OUTPUT
           else
             mkdir -p inputs
-            curl -L -o inputs/card_template.zip "$URL"
+            curl -L --progress-bar -o inputs/card_template.zip "$URL"
             TEMP_CARD=$(mktemp -d)
             unzip -q inputs/card_template.zip -d "$TEMP_CARD"
             echo "CARD_DIR=$TEMP_CARD" >> $GITHUB_ENV
@@ -109,14 +127,14 @@ jobs:
       - name: Build flash package
         id: build
         env:
-          PACKAGE_NAME: ${{ inputs.package_name }}
-          DEVICE_NAME: ${{ inputs.device_name }}
-          ANDROID_VER: ${{ inputs.android_ver }}
+          PACKAGE_NAME: ${{ inputs.package_name || 'LineageOS 23.2' }}
+          DEVICE_NAME: ${{ inputs.device_name || 'Xiaomi Pad 5 (nabu)' }}
+          ANDROID_VER: ${{ inputs.android_ver || 'Android 13' }}
           BUNDLE_NUMBER: ${{ inputs.bundle_number }}
           PATCH_LEVEL: ${{ inputs.patch_level }}
           BUILD_DATE: ${{ inputs.build_date }}
           AUTHOR: ${{ inputs.author }}
-          COMPRESSION_RATIO: ${{ inputs.compression_ratio }}
+          COMPRESSION_RATIO: ${{ inputs.compression_ratio || '0.60' }}
         run: |
           echo "=== Build Configuration ==="
           echo "Package: $PACKAGE_NAME"
@@ -127,6 +145,11 @@ jobs:
           [ -n "$BUILD_DATE" ]       && echo "Date:    $BUILD_DATE"
           [ -n "$AUTHOR" ]           && echo "Author:  $AUTHOR"
           echo "Ratio:   $COMPRESSION_RATIO"
+          echo "=========================="
+
+          # Check disk space
+          echo "=== Available Disk Space ==="
+          df -h .
           echo "=========================="
 
           # Determine sources
@@ -148,6 +171,12 @@ jobs:
           fi
 
           mkdir -p build_output
+          
+          # Show input sizes
+          echo "Input sizes:"
+          ls -lh "$LINE_ZIP" 2>/dev/null || true
+          du -sh "$CARD_DIR" 2>/dev/null || true
+          
           python3 build.py \
             --line-zip "$LINE_ZIP" \
             --card-dir "$CARD_DIR" \
@@ -166,6 +195,15 @@ jobs:
           echo "artifact_path=$ZIP_FILE" >> $GITHUB_OUTPUT
           echo "zip_name=$ZIP_NAME" >> $GITHUB_OUTPUT
           echo "Built: $(ls -lh "$ZIP_FILE" | awk '{print $5}')"
+
+      - name: Clean up intermediate files
+        if: always()
+        run: |
+          echo "Cleaning up..."
+          rm -rf inputs/
+          rm -rf build_output/*.zst 2>/dev/null || true
+          echo "=== Final Disk Space ==="
+          df -h /
 
       - name: Create GitHub Release
         if: github.event_name == 'workflow_dispatch' && inputs.release_tag != ''
